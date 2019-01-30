@@ -1,0 +1,7 @@
+./pcsx4all
+obj/
+obj_/
+*.gcda
+*.o
+*.elf
+*.zip

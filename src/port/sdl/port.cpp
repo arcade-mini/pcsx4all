@@ -32,6 +32,8 @@
   #include "gpu/gpu_unai/gpu.h"
 #endif
 
+SDL_Surface* real_screen;
+
 enum
 {
   DKEY_SELECT = 0,
@@ -60,8 +62,50 @@ unsigned short *SCREEN;
 static bool pcsx4all_initted = false;
 static bool emu_running = false;
 
+uint32_t sdl_joy_num = 0;
+
 void config_load();
 void config_save();
+
+#define AVERAGEHI(AB) ((((AB) & 0xF7DE0000) >> 1) + (((AB) & 0xF7DE) << 15))
+#define AVERAGELO(CD) ((((CD) & 0xF7DE) >> 1) + (((CD) & 0xF7DE0000) >> 17))
+
+void upscale_320xXXX_to_480x272(uint32_t *dst, uint32_t *src, uint32_t height)
+{
+	uint32_t Eh = 0;
+	uint32_t source = 0;
+	uint32_t dh = 0;
+	uint32_t y, x;
+
+	for (y = 0; y < 272; y++)
+	{
+		source = dh * 320/2;
+
+		for (x = 0; x < 480/6; x++)
+		{
+			register uint32_t ab, cd;
+
+			__builtin_prefetch(dst + 4, 1);
+			__builtin_prefetch(src + source + 4, 0);
+
+			ab = src[source] & 0xF7DEF7DE;
+			cd = src[source + 1] & 0xF7DEF7DE;
+			
+			*dst++ = (ab & 0xFFFF) + AVERAGEHI(ab);
+			*dst++ = (ab >> 16) + ((cd & 0xFFFF) << 16);
+			*dst++ = (cd & 0xFFFF0000) + AVERAGELO(cd);
+
+			source += 2;
+		}
+		Eh += height;
+		if(Eh >= 272)
+		{
+			Eh -= 272;
+			dh++; 
+		}
+	}
+}
+
 
 static void pcsx4all_exit(void)
 {
@@ -569,9 +613,6 @@ enum
 
 void joy_init(void)
 {
-  sdl_joy = SDL_JoystickOpen(0);
-  SDL_JoystickEventState(SDL_ENABLE);
-  /*
   	int i;
   	int joy_count;
 
@@ -595,7 +636,7 @@ void joy_init(void)
   	}
 
   	// make sure that Joystick event polling is a go
-  	SDL_JoystickEventState(SDL_ENABLE);*/
+  	SDL_JoystickEventState(SDL_ENABLE);
 }
 
 void pad_update(void)
@@ -629,8 +670,39 @@ void pad_update(void)
             break;
         }
         break;
-      default:
+      case SDL_JOYAXISMOTION:
+        switch (event.jaxis.axis)
+        {
+          case 0: /* X axis */
+            axisval = event.jaxis.value;
+            analog1 &= ~(ANALOG_LEFT | ANALOG_RIGHT);
+            if (axisval > joy_commit_range)
+            {
+              analog1 |= ANALOG_RIGHT;
+            }
+            else if (axisval < -joy_commit_range)
+            {
+              analog1 |= ANALOG_LEFT;
+            }
+            break;
+          case 1: /* Y axis*/
+            axisval = event.jaxis.value;
+            analog1 &= ~(ANALOG_UP | ANALOG_DOWN);
+            if (axisval > joy_commit_range)
+            {
+              analog1 |= ANALOG_DOWN;
+            }
+            else if (axisval < -joy_commit_range)
+            {
+              analog1 |= ANALOG_UP;
+            }
+            break;
+        }
         break;
+      case SDL_JOYBUTTONDOWN:
+        break;
+      default:
+		break;
     }
   }
 
@@ -770,16 +842,18 @@ void video_flip(void)
     port_printf(5, 5, pl_data.stats_msg);
   }
 
-  if(SDL_MUSTLOCK(screen))
+  if(SDL_MUSTLOCK(real_screen))
   {
-    SDL_UnlockSurface(screen);
+    SDL_UnlockSurface(real_screen);
   }
 
-  SDL_Flip(screen);
+	/*SDL_BlitSurface(screen, NULL, real_screen, NULL);*/
+	upscale_320xXXX_to_480x272((uint32_t*)real_screen->pixels, (uint32_t*)screen->pixels, screen->h);
+  SDL_Flip(real_screen);
 
-  if(SDL_MUSTLOCK(screen))
+  if(SDL_MUSTLOCK(real_screen))
   {
-    SDL_LockSurface(screen);
+    SDL_LockSurface(real_screen);
   }
   SCREEN = (Uint16 *)screen->pixels;
 }
@@ -862,7 +936,7 @@ int main (int argc, char **argv)
   Config.ShowFps=0;    // 0=don't show FPS
   Config.FrameLimit = true;
   Config.FrameSkip = FRAMESKIP_OFF;
-  Config.AnalogArrow = false;
+  Config.AnalogArrow = true;
 
   //zear - Added option to store the last visited directory.
   strncpy(Config.LastDir, home, MAXPATHLEN); /* Defaults to home directory. */
@@ -1313,7 +1387,7 @@ int main (int argc, char **argv)
   atexit(pcsx4all_exit);
 
 #if defined(RS97)
-	int flags = SDL_HWSURFACE | SDL_DOUBLEBUF;
+	int flags = SDL_HWSURFACE;
 #else
 	#ifdef SDL_TRIPLEBUF
 		int flags = SDL_HWSURFACE | SDL_TRIPLEBUF;
@@ -1322,7 +1396,9 @@ int main (int argc, char **argv)
 	#endif
 #endif
 
-  screen = SDL_SetVideoMode(320, 240, 16, flags);
+  /*screen = SDL_SetVideoMode(320, 240, 16, flags);*/
+  real_screen = SDL_SetVideoMode(480, 272, 16, flags);
+  screen = SDL_CreateRGBSurface(SDL_SWSURFACE, 320, 240, 16, 0,0,0,0);
   if (!screen)
   {
     puts("Failed to set video mode");
